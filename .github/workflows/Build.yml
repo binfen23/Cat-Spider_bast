@@ -1,0 +1,115 @@
+name: Build Custom Spider Jar & Cache
+
+# 触发条件：可根据需求修改（如 push 到 main 分支、tag 发布等）
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  build-jar:
+    runs-on: ubuntu-latest  # 选用 Ubuntu 环境（命令兼容性好、速度快）
+    steps:
+      # 步骤1：检出仓库代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 步骤2：配置 Java 环境（apktool 依赖 Java 运行）
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'  # 适配大多数 Android 项目，可根据你的项目调整
+          distribution: 'temurin'
+          cache: gradle  # 缓存 Gradle 依赖（加速构建）
+
+      # 步骤3：创建 3rd 目录并下载 apktool 2.11.0（复刻原脚本的依赖）
+      - name: Prepare apktool 2.11.0
+        run: |
+          mkdir -p ./jar/3rd  # 递归创建 3rd 目录
+          # 下载 apktool（验证过链接有效，若失效可替换为官方最新下载地址）
+          wget -O ./jar/3rd/apktool_2.11.0.jar \
+            https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.11.0.jar
+          # 验证下载是否成功
+          if [ ! -f "./jar/3rd/apktool_2.11.0.jar" ]; then
+            echo "apktool 下载失败！"
+            exit 1
+          fi
+
+      # 步骤4：构建 Release APK（关键！原脚本依赖 app-release-unsigned.apk）
+      # 👉 若你的项目不是 Gradle 构建（如 Maven），请替换为对应的构建命令
+      - name: Build Release APK
+        run: ./gradlew assembleRelease
+        working-directory: .  # 若项目根目录不是 Gradle 根目录，需调整路径
+        env:
+          # 禁用 Gradle 守护进程（加速 CI 环境构建）
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+
+      # 步骤5：复刻原 bat 脚本的核心逻辑（Windows 命令 → Linux 命令转换）
+      - name: Execute jar build logic
+        run: |
+          # 1. 删除旧文件/目录
+          rm -f ./jar/custom_spider.jar
+          rm -rf ./jar/Smali_classes
+
+          # 2. 反编译 APK（仅保留主类）
+          java -jar ./jar/3rd/apktool_2.11.0.jar \
+            d -f --only-main-classes \
+            ./app/build/outputs/apk/release/app-release-unsigned.apk \
+            -o ./jar/Smali_classes
+
+          # 3. 删除目标目录旧文件
+          rm -rf ./jar/spider.jar/smali/com/github/catvod/spider
+          rm -rf ./jar/spider.jar/smali/com/github/catvod/js
+          rm -rf ./jar/spider.jar/smali/org/slf4j
+
+          # 4. 创建必要目录（递归创建，忽略已存在）
+          mkdir -p ./jar/spider.jar/smali/com/github/catvod/
+          mkdir -p ./jar/spider.jar/smali/org/slf4j/
+
+          # 5. 移动 smali 文件
+          mv ./jar/Smali_classes/smali/com/github/catvod/spider \
+             ./jar/spider.jar/smali/com/github/catvod/
+          mv ./jar/Smali_classes/smali/com/github/catvod/js \
+             ./jar/spider.jar/smali/com/github/catvod/
+          mv ./jar/Smali_classes/smali/org/slf4j \
+             ./jar/spider.jar/smali/org/
+
+          # 6. 打包生成 dex.jar
+          java -jar ./jar/3rd/apktool_2.11.0.jar \
+            b ./jar/spider.jar -c
+
+          # 7. 重命名为 custom_spider.jar
+          mv ./jar/spider.jar/dist/dex.jar ./jar/custom_spider.jar
+
+          # 8. 生成 MD5 文件（Linux 替代 Windows 的 certUtil）
+          md5sum ./jar/custom_spider.jar | awk '{print $1}' > ./jar/custom_spider.jar.md5
+
+          # 9. 清理临时目录
+          rm -rf ./jar/spider.jar/build
+          rm -rf ./jar/spider.jar/smali
+          rm -rf ./jar/spider.jar/dist
+          rm -rf ./jar/Smali_classes
+
+          # 验证产物是否生成成功
+          if [ ! -f "./jar/custom_spider.jar" ] || [ ! -f "./jar/custom_spider.jar.md5" ]; then
+            echo "jar 或 md5 文件生成失败！"
+            exit 1
+          fi
+          echo "Jar 构建完成："
+          ls -lh ./jar/custom_spider.jar*
+
+      # 步骤6：缓存生成的 Jar 和 MD5 文件（核心需求）
+      - name: Cache custom_spider.jar & MD5
+        uses: actions/cache@v3
+        with:
+          # 要缓存的文件路径（与生成路径一致）
+          path: |
+            ./jar/custom_spider.jar
+            ./jar/custom_spider.jar.md5
+          # 缓存 Key：用 Commit SHA 确保缓存与代码版本绑定（避免旧缓存冲突）
+          key: ${{ github.sha }}-custom-spider-jar
+          # 恢复策略：优先使用当前 Commit 的缓存，无则不恢复（可根据需求调整）
+          restore-keys: |
+            ${{ github.sha }}-custom-spider-jar
