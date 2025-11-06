@@ -1,17 +1,13 @@
-name: Build Custom Spider Jar & Cache
+name: Build Custom Spider Jar & Upload Artifact
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:  # 支持手动触发
 
 jobs:
   build-jar:
     runs-on: ubuntu-latest
     steps:
-      # 步骤1：检出仓库代码（会自动拉取 jar/3rd 目录下的已有文件）
+      # 步骤1：检出仓库代码（拉取已有 apktool 和 oss.jar）
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -21,23 +17,23 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: gradle  # 缓存 Gradle 依赖，加速构建
+          cache: gradle  # 仍缓存 Gradle 依赖（加速构建）
 
-      # 步骤3：构建 Release APK（修复权限问题 + 依赖刷新优化）
+      # 步骤3：构建 Release APK（修复权限 + 依赖优化）
       - name: Build Release APK
         run: bash gradlew assembleRelease --refresh-dependencies --rerun-tasks
         working-directory: .
         env:
-          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g"  # 增加堆内存，避免OOM
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g"
 
-      # 步骤4：复刻原 bat 脚本核心逻辑（Linux 适配，直接使用仓库已有 apktool）
+      # 步骤4：复刻原 bat 脚本核心逻辑（生成 Jar 和 MD5）
       - name: Execute jar build logic
         run: |
           # 删除旧文件/目录
           rm -f ./jar/custom_spider.jar
           rm -rf ./jar/Smali_classes
 
-          # 反编译 APK（仅保留主类，使用仓库已有的 apktool）
+          # 反编译 APK（使用仓库已有 apktool）
           java -jar ./jar/3rd/apktool_2.11.0.jar \
             d -f --only-main-classes \
             ./app/build/outputs/apk/release/app-release-unsigned.apk \
@@ -84,13 +80,13 @@ jobs:
           echo "构建成功，产物信息："
           ls -lh ./jar/custom_spider.jar*
 
-      # 步骤5：缓存生成的 Jar 和 MD5
-      - name: Cache custom_spider.jar & MD5
-        uses: actions/cache@v3
+      # 步骤5：上传产物到 Artifacts（核心修改！替换缓存步骤）
+      - name: Upload Jar & MD5 Artifact
+        uses: actions/upload-artifact@v4
         with:
+          name: custom-spider-artifact  # 产物包名称（可自定义，比如改版本号）
           path: |
             ./jar/custom_spider.jar
             ./jar/custom_spider.jar.md5
-          key: ${{ github.sha }}-custom-spider-jar
-          restore-keys: |
-            ${{ github.sha }}-custom-spider-jar
+          retention-days: 30  # 产物保留30天（默认90天，可调整）
+          if-no-files-found: error  # 若没找到文件，直接报错（避免空产物）
